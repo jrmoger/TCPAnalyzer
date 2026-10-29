@@ -16,23 +16,13 @@ ACK = 1
 FIN = 2
 RST = 3
 
-SRC_PORT = 0
-DST_PORT = 1
+ADDRESS_TUPLE = 0
+TIMESTAMP = 1
 SEQ_NUM = 2
 ACK_NUM = 3
 DATA_OFFSET = 4
 FLAGS = 5
 WINDOW_SIZE = 6
-
-
-# flags = (SYN, ACK, FIN, RST)
-
-def parse_packet_header(header:bytes) -> tuple[int, int, int, int]:
-    '''
-    returns values of packet header in a tuple: (ts_sec, ts_usec, incl_len, orig_len)
-    '''
-    ts_sec, ts_usec, incl_len, orig_len = struct.unpack(endian+'IIII', header)
-    return (ts_sec, ts_usec, incl_len, orig_len)
 
 def get_relative_time(ts_sec:int, ts_usec:int, t0:float) -> float:
     '''
@@ -41,35 +31,40 @@ def get_relative_time(ts_sec:int, ts_usec:int, t0:float) -> float:
     ts_abs = ts_sec + ts_usec*10**-6
     return ts_abs - t0
 
-def get_ip(packet:bytes) -> tuple[str, str]:
+def parse_packet(packet:bytes, ts:float) -> tuple[tuple[str, int, str, int], float, int, int, int, tuple[int, int, int, int], int]:
+    '''
+    returns tcp information: (4-tuple(), seq_num, ack_num, data_offset, flags(), window_size)
+    '''
     buffer1 = packet[src_ip_offset:src_ip_offset+4]
     buffer2 = packet[dst_ip_offset:dst_ip_offset+4]
     src_addr = struct.unpack('BBBB', buffer1)
     dst_addr = struct.unpack('BBBB', buffer2)
     src_ip = str(src_addr[0])+'.'+str(src_addr[1])+'.'+str(src_addr[2])+'.'+str(src_addr[3])
     dst_ip = str(dst_addr[0])+'.'+str(dst_addr[1])+'.'+str(dst_addr[2])+'.'+str(dst_addr[3])
-    return (src_ip, dst_ip)
-
-def get_tcp(packet:bytes) -> tuple[int, int, int, int, int, tuple[int, int, int, int], int]:
-    '''
-    returns tcp information: (src_port, dst_port, seq_num, ack_num, data_offset, flags(), window_size)
-    '''
 
     buffer3 = int.from_bytes(packet[tcp_flag_offset+1:tcp_flag_offset+2])
-    buffer5 = packet[tcp_header_start:tcp_window_offset+2]
+    buffer4 = packet[tcp_header_start:tcp_window_offset+2]
 
     (src_port, dst_port, seq_num, ack_num, data_offset, 
-     window_size) = struct.unpack('>HHIIBxH', buffer5)
-    data_offset = int((data_offset & 0b11110000) >> 4) * 4
-
+     window_size) = struct.unpack('>HHIIBxH', buffer4)
+    data_offset = int((data_offset & 0b11110000) >> 4) * 4 # get high 4 bits and mulitply by 4
 
     syn = (buffer3 & 0x02) >> 1
     ack = (buffer3 & 0x10) >> 4
     fin = (buffer3 & 0x01)
     rst = (buffer3 & 0x04) >> 2
     flags = (syn, ack, fin, rst)
+    address = (src_ip, src_port, dst_ip, dst_port)
+    return (address, ts, seq_num, ack_num, data_offset, flags, window_size)
 
-    return (src_port, dst_port, seq_num, ack_num, data_offset, flags, window_size)
+def get_key(ip:tuple[str, int, str, int]) -> tuple[str, int, str, int]:
+    '''
+    converts 4-tuple into a lexicographically sorted key
+    '''
+    if ip[0] < ip[2]:
+        return ip
+    else:
+        return (ip[2], ip[3], ip[0], ip[1])
 
 f = open("sample-capture-file.cap", "rb")
 
@@ -100,31 +95,26 @@ ts = ts_abs - ts_0
 print(f"{ts:.6f}" )
 print(f"{ts_abs:.6f}" )
 
-connection_dict = {}
+connection_dict = {} # connection dictionary
 packets = [] # store packet tuples: (timestamp, ...)
-n = 0 # packet number
+n = 1 # packet number
 
-# packet_header = f.read(orig_len)
-# protocol_val = struct.unpack('B', packet_header[protocol_offset:protocol_offset+1])[0]
 
-# print(protocol_val)
-# # if protocol_val == 6:
-# #     # is tcp
-
-while True and n < 2:
+while True and n < 5000:
     print("packet num:", n)
     packet_data = f.read(orig_len)
-    # print(packet_data)
     protocol_val = struct.unpack('B', packet_data[protocol_offset:protocol_offset+1])[0]
     print("protocol_val:", protocol_val)
     if protocol_val == 6:
-        packets.append((ts, packet_data))
-        ip = get_ip(packet_data)
-        tcp = get_tcp(packet_data)
+        # packets.append((ts, packet_data))
+        parsed_packet = parse_packet(packet_data, ts)
         print("ts:", ts)
-        print("ip:", ip)
-        print("tcp:", tcp)
-        # packets.append(ts)
+        print("packet:", parsed_packet)
+        key = get_key(parsed_packet[ADDRESS_TUPLE])
+        if key in connection_dict:
+            connection_dict[key].append(parsed_packet)
+        else:
+            connection_dict[key] = [parsed_packet]
     else:
         print("skipping packet")
 
@@ -135,5 +125,8 @@ while True and n < 2:
     ts = get_relative_time(ts_sec, ts_usec, ts_0)
     n+=1
 
+for connection in connection_dict:
+    print(connection)
 
-# print(packets)
+f.close()
+# print(connection_dict)
