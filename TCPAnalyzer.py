@@ -1,4 +1,5 @@
 import struct
+
 # indices
 protocol_offset = 23
 ip_header_start = 14
@@ -11,11 +12,13 @@ tcp_ack_offset = tcp_header_start + 8
 tcp_flag_offset = tcp_header_start + 12
 tcp_window_offset = tcp_header_start + 14
 
+# flag tuple indices (SYN, ACK, FIN, RST)
 SYN = 0
 ACK = 1
 FIN = 2
 RST = 3
 
+# packet tuple indices (ADDRESS, TS, SEQ, ACK, OFFSET, FLAGS, WSIZE)
 ADDRESS_TUPLE = 0
 TIMESTAMP = 1
 SEQ_NUM = 2
@@ -28,7 +31,7 @@ def get_relative_time(ts_sec:int, ts_usec:int, t0:float) -> float:
     '''
     returns time relative to t0
     '''
-    ts_abs = ts_sec + ts_usec*10**-6
+    ts_abs = ts_sec + (ts_usec*10**-6)
     return ts_abs - t0
 
 def parse_packet(packet:bytes, ts:float) -> tuple[tuple[str, int, str, int], float, int, int, int, tuple[int, int, int, int], int]:
@@ -88,7 +91,7 @@ packet_header = f.read(16)
 ts_sec, ts_usec, incl_len, orig_len = struct.unpack(endian+'IIII', packet_header)
 
 print(ts_sec, ts_usec, incl_len, orig_len)
-ts_abs = ts_sec + ts_usec * 10**-6
+ts_abs = ts_sec + (ts_usec * 10**-6)
 ts_0 = ts_abs
 ts = ts_abs - ts_0
 
@@ -96,20 +99,14 @@ print(f"{ts:.6f}" )
 print(f"{ts_abs:.6f}" )
 
 connection_dict = {} # connection dictionary
-packets = [] # store packet tuples: (timestamp, ...)
 n = 1 # packet number
 
-
-while True and n < 5000:
+while True:
     print("packet num:", n)
     packet_data = f.read(orig_len)
     protocol_val = struct.unpack('B', packet_data[protocol_offset:protocol_offset+1])[0]
-    print("protocol_val:", protocol_val)
     if protocol_val == 6:
-        # packets.append((ts, packet_data))
         parsed_packet = parse_packet(packet_data, ts)
-        print("ts:", ts)
-        print("packet:", parsed_packet)
         key = get_key(parsed_packet[ADDRESS_TUPLE])
         if key in connection_dict:
             connection_dict[key].append(parsed_packet)
@@ -125,8 +122,33 @@ while True and n < 5000:
     ts = get_relative_time(ts_sec, ts_usec, ts_0)
     n+=1
 
+
 for connection in connection_dict:
-    print(connection)
+    syn_count = 0
+    fin_count = 0
+    start_time = 0
+    end_time = 0
+    rst = 0
+    for packet in connection_dict[connection]:
+        # print(packet)
+        if packet[FLAGS][RST] == 1:
+            rst = 1
+
+        if packet[FLAGS][SYN] == 1:
+            syn_count += 1
+            if start_time == 0 or packet[TIMESTAMP] < start_time:
+                start_time = packet[TIMESTAMP]
+        elif packet[FLAGS][FIN] == 1:
+            fin_count += 1
+            if packet[TIMESTAMP] > end_time:
+                end_time = packet[TIMESTAMP]
+    if syn_count < 1 or fin_count < 1:
+        print(f"incomplete connection {connection}: s{syn_count}f{fin_count}")
+        continue
+    
+    print(f"complete connection {connection}: s{syn_count}f{fin_count}")
+    print(f"\tduration: {(end_time - start_time):.6f}")
+
 
 f.close()
 # print(connection_dict)
