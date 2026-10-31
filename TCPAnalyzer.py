@@ -61,7 +61,7 @@ def parse_packet(packet: bytes, ts: float):
     address = (src_ip, src_port, dst_ip, dst_port)
     return (address, ts, seq_num, ack_num, data_offset, (syn, ack, fin, rst), window_size)
 
-def get_key(ip:tuple[str, int, str, int]) -> tuple[str, int, str, int]:
+def get_key(ip):
     '''
     returns lexicographically sorted key of given 4-tuple
     '''
@@ -238,9 +238,9 @@ def main(path):
 
     print("\nC) General")
     print(f"The total number of complete TCP connections: {complete_count}")
-    print(f"The number of reset TCP connections: {rst_count}")
-    print(f"The number of TCP connections that were still open when the trace capture ended: {open_count}")
-    print(f"The number of TCP connections established before the capture started: {before_count}")
+    print(f"Number of reset TCP connections: {rst_count}")
+    print(f"Number of TCP connections that were still open when the trace capture ended: {open_count}")
+    print(f"Number of TCP connections established before the capture started: {before_count}")
 
 
     print("\nD) Complete TCP connections:")
