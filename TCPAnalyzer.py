@@ -89,7 +89,7 @@ def find_source(packets):
             return p[ADDRESS_TUPLE]
     return packets[0][ADDRESS_TUPLE]
 
-def calculate_rtt_samples(packets: list) -> list[float]:
+def calculate_rtt_samples(packets):
     '''
     method 1 (top down scan)
     for each data packet, the first later ACK from the other endpoint
