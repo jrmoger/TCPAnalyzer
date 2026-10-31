@@ -39,40 +39,33 @@ def get_relative_time(ts_sec:int, ts_usec:int, t0:float) -> float:
     ts_abs = ts_sec + (ts_usec*10**-6)
     return ts_abs - t0
 
-def parse_packet(packet:bytes, ts:float) -> tuple[tuple[str, int, str, int], float, int, int, int, tuple[int, int, int, int], int]:
+def parse_packet(packet: bytes, ts: float):
     '''
-    returns tcp information: (4-tuple(), seq_num, ack_num, data_offset, flags(), window_size)
+    returns tcp information: ((4-tuple), seq_num, ack_num, data_offset, (flags), window_size)
     '''
-    buffer1 = packet[src_ip_offset:src_ip_offset+4]
-    buffer2 = packet[dst_ip_offset:dst_ip_offset+4]
-    src_addr = struct.unpack('BBBB', buffer1)
-    dst_addr = struct.unpack('BBBB', buffer2)
-    src_ip = str(src_addr[0])+'.'+str(src_addr[1])+'.'+str(src_addr[2])+'.'+str(src_addr[3])
-    dst_ip = str(dst_addr[0])+'.'+str(dst_addr[1])+'.'+str(dst_addr[2])+'.'+str(dst_addr[3])
+    ip_hdr_len = (packet[ip_header_start] & 0x0F) * 4   # IHL, in bytes
+    tcp_start = ip_header_start + ip_hdr_len            # TCP header follows the IP header
 
-    buffer3 = int.from_bytes(packet[tcp_flag_offset+1:tcp_flag_offset+2])
-    buffer4 = packet[tcp_header_start:tcp_window_offset+2]
+    src_ip = '.'.join(str(b) for b in packet[src_ip_offset:src_ip_offset + 4])
+    dst_ip = '.'.join(str(b) for b in packet[dst_ip_offset:dst_ip_offset + 4])
 
-    (src_port, dst_port, seq_num, ack_num, data_offset, 
-     window_size) = struct.unpack('>HHIIBxH', buffer4)
-    data_offset = int((data_offset & 0b11110000) >> 4) * 4 # get high 4 bits and mulitply by 4
+    (src_port, dst_port, seq_num, ack_num,
+     offset_byte, flag_byte, window_size) = struct.unpack('>HHIIBBH', packet[tcp_start:tcp_start + 16])
 
-    syn = (buffer3 & 0x02) >> 1
-    ack = (buffer3 & 0x10) >> 4
-    fin = (buffer3 & 0x01)
-    rst = (buffer3 & 0x04) >> 2
-    flags = (syn, ack, fin, rst)
+    data_offset = ((offset_byte & 0xF0) >> 4) * 4   # TCP header length in bytes
+    syn = (flag_byte & 0x02) >> 1
+    ack = (flag_byte & 0x10) >> 4
+    fin = flag_byte & 0x01
+    rst = (flag_byte & 0x04) >> 2
+
     address = (src_ip, src_port, dst_ip, dst_port)
-    return (address, ts, seq_num, ack_num, data_offset, flags, window_size)
+    return (address, ts, seq_num, ack_num, data_offset, (syn, ack, fin, rst), window_size)
 
 def get_key(ip:tuple[str, int, str, int]) -> tuple[str, int, str, int]:
     '''
-    converts 4-tuple into a lexicographically sorted key
+    returns lexicographically sorted key of given 4-tuple
     '''
-    if ip[0] < ip[2]:
-        return ip
-    else:
-        return (ip[2], ip[3], ip[0], ip[1])
+    return ip if (ip[0], ip[1]) < (ip[2], ip[3]) else (ip[2], ip[3], ip[0], ip[1])
 
 def get_payload_len(packet: bytes) -> int:
     # IP header length from IHL (low nibble of first IP byte), in bytes
@@ -86,6 +79,15 @@ def get_payload_len(packet: bytes) -> int:
     tcp_hdr_len = ((packet[tcp_start + 12] & 0xF0) >> 4) * 4
 
     return ip_total_len - ip_hdr_len - tcp_hdr_len
+
+def find_source(packets):
+    '''
+    find the source endpoint from a list of packets
+    '''
+    for p in packets:
+        if p[FLAGS][SYN] == 1 and p[FLAGS][ACK] == 0:
+            return p[ADDRESS_TUPLE]
+    return packets[0][ADDRESS_TUPLE]
 
 def calculate_rtt_samples(packets: list) -> list[float]:
     '''
@@ -133,158 +135,132 @@ def main(path):
     (magic, version_major, version_minor, thiszone,
     sigfigs, snaplen, network) = struct.unpack(endian + 'IHHiIII', global_header)
 
-    packet_header = f.read(16)
-    ts_sec, ts_usec, incl_len, orig_len = struct.unpack(endian+'IIII', packet_header)
-
-    ts_abs = ts_sec + (ts_usec * 10**-6)
-    ts_0 = ts_abs
-    ts = ts_abs - ts_0
-
-
-    connection_dict = {} # connection dictionary
-    n = 1 # packet number
-
+    connection_dict = {}
+    ts_0 = None
     while True:
-        packet_data = f.read(incl_len)
-        protocol_val = struct.unpack('B', packet_data[protocol_offset:protocol_offset+1])[0]
-        if protocol_val == 6:
-            parsed_packet = parse_packet(packet_data, ts)
-            parsed_packet = parsed_packet + (packet_data, get_payload_len(packet_data))
-            key = get_key(parsed_packet[ADDRESS_TUPLE])
-            if key in connection_dict:
-                connection_dict[key].append(parsed_packet)
-            else:
-                connection_dict[key] = [parsed_packet]
-        else:
-            print("skipping packet")
-
         packet_header = f.read(16)
         if len(packet_header) < 16:
             break
-        ts_sec, ts_usec, incl_len, orig_len = struct.unpack(endian+'IIII', packet_header)
-        ts = get_relative_time(ts_sec, ts_usec, ts_0)
-        n+=1
+        ts_sec, ts_usec, incl_len, orig_len = struct.unpack(endian + 'IIII', packet_header)
+        if ts_0 is None:
+            ts_0 = (ts_sec, ts_usec)
+        ts = (ts_sec - ts_0[0]) + (ts_usec - ts_0[1]) / 1e6   # integer subtraction keeps precision
+
+        packet_data = f.read(incl_len)
+        # keep only IPv4 (EtherType 0x0800) TCP (protocol 6) frames
+        if len(packet_data) < 54 or packet_data[12:14] != b'\x08\x00' or packet_data[23] != 6:
+            continue
+
+        parsed = parse_packet(packet_data, ts) + (packet_data, get_payload_len(packet_data))
+        connection_dict.setdefault(get_key(parsed[ADDRESS_TUPLE]), []).append(parsed)
 
     f.close()
 
-    print(f"Total number of connections: {len(connection_dict)}")
-    print("\n\n------------------------------\n\n")
+    print(f"A) Total number of connections: {len(connection_dict)}\n")
+    print("B) Connections' details:")
 
-    rst_count = 0
-    connection_num = 0
-    complete_count = 0
-    incomplete_count = 0
-    no_start_count = 0
-    durations = []
-    rtt_values = []
-    packets_sent = []
-    window_sizes = []
+    rst_count = complete_count = open_count = before_count = 0
+    durations, packets_sent, window_sizes, rtt_values = [], [], [], []
 
-    for connection in connection_dict:
-        syn_count = 0
-        fin_count = 0
+    rst_count = complete_count = open_count = before_count = 0
+    durations, packets_sent, window_sizes, rtt_values = [], [], [], []
+
+
+
+    for connection_num, packets in enumerate(connection_dict.values(), start=1):
+        source = find_source(packets)
+        syn_count = fin_count = rst = 0
         start_time = None
         end_time = 0
-        rst = 0
-        source = None
-        packet_count = 0
-        src_dst_count = 0
-        dst_src_count = 0
-        src_dst_byte_count = 0
-        dst_src_byte_count = 0
-        byte_count = 0
-        connection_num += 1
-        status = 0
+        src_dst_count = dst_src_count = 0
+        src_dst_bytes = dst_src_bytes = 0
 
-        for packet in connection_dict[connection]:  # iterate over each connection
-            address = packet[ADDRESS_TUPLE]
-            if packet[FLAGS][RST] == 1:
+        for p in packets:
+            if p[FLAGS][RST]:
                 rst = 1
-
-            if packet[FLAGS][SYN] == 1: # iterate over each packet in a connection
+            if p[FLAGS][SYN]:                  # SYN and SYN+ACK both count as SYN
                 syn_count += 1
-                if start_time is None or packet[TIMESTAMP] < start_time:
-                    start_time = packet[TIMESTAMP]
-                if source is None:        # since get_key() sorts the endpoints, record first SYN as source
-                    source = address
-            if packet[FLAGS][FIN] == 1:
+                if start_time is None or p[TIMESTAMP] < start_time:
+                    start_time = p[TIMESTAMP]
+            if p[FLAGS][FIN]:                  # separate if, so SYN+FIN counts for both
                 fin_count += 1
-                if packet[TIMESTAMP] > end_time:
-                    end_time = packet[TIMESTAMP]
-            if address == source:
+                end_time = max(end_time, p[TIMESTAMP])
+            if p[ADDRESS_TUPLE] == source:
                 src_dst_count += 1
-                src_dst_byte_count += packet[PAYLOAD_LEN]
+                src_dst_bytes += p[PAYLOAD_LEN]
             else:
                 dst_src_count += 1
-                dst_src_byte_count += packet[PAYLOAD_LEN]
-            packet_count += 1
-            byte_count += packet[PAYLOAD_LEN]
+                dst_src_bytes += p[PAYLOAD_LEN]
 
+        is_reset = rst == 1
+        is_complete = syn_count >= 1 and fin_count >= 1 and not is_reset
 
-        if syn_count < 1 or fin_count < 1:
-            status = 1
-
-        if rst == 1:
+        if is_reset:
             rst_count += 1
-            status = 2
+        if packets[0][FLAGS][SYN] == 0:        # first segment is not a SYN
+            before_count += 1
+        has_data_after_fin = any(p[PAYLOAD_LEN] > 0 and p[TIMESTAMP] > end_time for p in packets)
+        if not is_reset and (fin_count == 0 or has_data_after_fin):
+            open_count += 1
 
-        duration = end_time - start_time # type: ignore
+        status = "R" if is_reset else f"S{syn_count}F{fin_count}"
 
-        if source is None:
-            source = ("error", "error", "error", "error")
-
-        print(f"Connection {connection_num}:")
-        print(f"Source address: {source[0]}")
-        print(f"Destination address: {source[2]}")
-        print(f"Source port: {source[1]}")
-        print(f"Destination port: {source[3]}")
-        if status == 2:
-            print(f"Status: R")
-        else:
-            print(f"Status: S{syn_count}F{fin_count}")
-
-        if status == 0:
-            durations.append(duration)
-            packets_sent.append(packet_count)
-            window_sizes.extend(packet[WINDOW_SIZE] for packet in connection_dict[connection]) # record window sizes of complete connections
+        if is_complete:
             complete_count += 1
-            samples = calculate_rtt_samples(connection_dict[connection])
+            durations.append(end_time - start_time) # type: ignore
+            packets_sent.append(len(packets))
+            window_sizes.extend(p[WINDOW_SIZE] for p in packets)
+            samples = calculate_rtt_samples(packets)
             if samples:
                 rtt_values.append(sum(samples) / len(samples))
-            
+
+        if connection_num > 1:
+            print("\n+++++++++++++++++++++++++++++++++\n")
+        print(f"Connection {connection_num}:")
+        print(f"Source Address: {source[0]}")
+        print(f"Destination address: {source[2]}")
+        print(f"Source Port: {source[1]}")
+        print(f"Destination Port: {source[3]}")
+        print(f"Status: {status}")
+        if is_complete:
             print(f"Start time: {start_time:.6f}")
-            print(f"End time: {end_time:.6f}")
-            print(f"Duration: {duration:.6f}")
+            print(f"End Time: {end_time:.6f}")
+            print(f"Duration: {end_time - start_time:.6f}")
             print(f"Number of packets sent from Source to Destination: {src_dst_count}")
             print(f"Number of packets sent from Destination to Source: {dst_src_count}")
-            print(f"Total number of packets: {packet_count}")
-            print(f"Number of data bytes sent from Source to Destination: {src_dst_byte_count}")
-            print(f"Number of data bytes sent from Destination to Source: {dst_src_byte_count}")
-            print(f"Total number of data bytes: {byte_count}")
-        print("\n\t\t----------\n")
+            print(f"Total number of packets: {len(packets)}")
+            print(f"Number of data bytes sent from Source to Destination: {src_dst_bytes}")
+            print(f"Number of data bytes sent from Destination to Source: {dst_src_bytes}")
+            print(f"Total number of data bytes: {src_dst_bytes + dst_src_bytes}")
+
 
     print("\n\n------------------------------\n\n")
 
-    print(f"Total number of TCP connections: {complete_count}")
-    print(f"Number of reset TCP connections: {rst_count}")
-    print(f"Number of TCP connections that were still open when the tract capture ended: {incomplete_count}")
-    print(f"Number of TCP connections established before the capture started: {no_start_count}")
+    print("\nC) General")
+    print(f"The total number of complete TCP connections: {complete_count}")
+    print(f"The number of reset TCP connections: {rst_count}")
+    print(f"The number of TCP connections that were still open when the trace capture ended: {open_count}")
+    print(f"The number of TCP connections established before the capture started: {before_count}")
 
-    print(f"\nMinimum time duration: {min(durations):.6f}")
-    print(f"Mean time duration: {(sum(durations) / len(durations)):.6f}")
-    print(f"Maximum time duration: {max(durations):.6f}")
 
-    print(f"\nMinimum RTT value: {min(rtt_values):.6f}")
-    print(f"Mean RTT value: {(sum(rtt_values) / len(rtt_values)):.6f}")
-    print(f"Maximum RTT value: {max(rtt_values):.6f}")
+    print("\nD) Complete TCP connections:")
+    print_stats("time duration", durations)
+    print_stats("RTT value", rtt_values)
+    print_stats("number of packets including both send/received", packets_sent,
+                minmax_fmt="d", mean_fmt=".2f")
+    print_stats("receive window size including both send/received", window_sizes,
+                minmax_fmt="d", mean_fmt=".2f")
 
-    print(f"\nMinimum number of packets including send/recieved: {min(packets_sent)}")
-    print(f"Mean number of packets including send/recieved: {sum(packets_sent) / len(packets_sent)}")
-    print(f"Maximum number of packets including send/recieved: {max(packets_sent)}")
 
-    print(f"\nMinimum receive window size including both send/received: {min(window_sizes)}")
-    print(f"Mean receive window size including both send/received: {(sum(window_sizes) / len(window_sizes)):.2f}")
-    print(f"Maximum receive window size including both send/received: {max(window_sizes)}")
+def print_stats(name, values, minmax_fmt=".6f", mean_fmt=".6f"):
+    '''prints the min, mean and max of values, or N/A when the list is empty'''
+    if not values:
+        for label in ("Minimum", "Mean", "Maximum"):
+            print(f"{label} {name}: N/A")
+        return
+    print(f"Minimum {name}: {min(values):{minmax_fmt}}")
+    print(f"Mean {name}: {sum(values) / len(values):{mean_fmt}}")
+    print(f"Maximum {name}: {max(values):{minmax_fmt}}\n")
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
