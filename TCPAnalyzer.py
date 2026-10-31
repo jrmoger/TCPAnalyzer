@@ -174,6 +174,7 @@ def main(path):
     connection_num = 0
     complete_count = 0
     incomplete_count = 0
+    no_start_count = 0
     durations = []
     rtt_values = []
     packets_sent = []
@@ -229,15 +230,6 @@ def main(path):
 
         duration = end_time - start_time # type: ignore
 
-        if status == 0:
-            durations.append(duration)
-            packets_sent.append(packet_count)
-            window_sizes.extend(packet[WINDOW_SIZE] for packet in connection_dict[connection]) # record window sizes of complete connections
-            complete_count += 1
-            samples = calculate_rtt_samples(connection_dict[connection])
-            if samples:
-                rtt_values.append(sum(samples) / len(samples))
-
         if source is None:
             source = ("error", "error", "error", "error")
 
@@ -250,7 +242,16 @@ def main(path):
             print(f"Status: R")
         else:
             print(f"Status: S{syn_count}F{fin_count}")
+
         if status == 0:
+            durations.append(duration)
+            packets_sent.append(packet_count)
+            window_sizes.extend(packet[WINDOW_SIZE] for packet in connection_dict[connection]) # record window sizes of complete connections
+            complete_count += 1
+            samples = calculate_rtt_samples(connection_dict[connection])
+            if samples:
+                rtt_values.append(sum(samples) / len(samples))
+            
             print(f"Start time: {start_time:.6f}")
             print(f"End time: {end_time:.6f}")
             print(f"Duration: {duration:.6f}")
@@ -267,7 +268,7 @@ def main(path):
     print(f"Total number of TCP connections: {complete_count}")
     print(f"Number of reset TCP connections: {rst_count}")
     print(f"Number of TCP connections that were still open when the tract capture ended: {incomplete_count}")
-    print(f"Number of TCP connections established before the capture started: {}")
+    print(f"Number of TCP connections established before the capture started: {no_start_count}")
 
     print(f"\nMinimum time duration: {min(durations):.6f}")
     print(f"Mean time duration: {(sum(durations) / len(durations)):.6f}")
